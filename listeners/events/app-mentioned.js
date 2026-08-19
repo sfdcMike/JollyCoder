@@ -27,21 +27,28 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
     return;
   }
 
-  await setStatus({
-    status: 'Thinking\u2026',
-    loading_messages: [
-      'Wondering why my boat has so many sails…',
-      'Getting Polly a cracker. This bird is so needy.',
-      'Asking a mermaid for advice.',
-      'Feeling some scurvy coming on…',
-      'Land-ho! Oh wait, its just a big wave.',
-      'All the rats left. How odd.',
-      'You know, the plank is really just decor.',
-      'I put a mop on me peg-leg. Innovation.',
-      "Captain's log: consultin' the seastars.",
-    ],
-  });
+const alreadyInCodeChannel = isCodeChannel(channelId);
 
+if (!alreadyInCodeChannel) {
+  try {
+    await setStatus({
+      status: 'Thinking\u2026',
+      loading_messages: [
+        'Wondering why my boat has so many sails…',
+        'Getting Polly a cracker. This bird is so needy.',
+        'Asking a mermaid for advice.',
+        'Feeling some scurvy coming on…',
+        'Land-ho! Oh wait, its just a big wave.',
+        'All the rats left. How odd.',
+        'You know, the plank is really just decor.',
+        'I put a mop on me peg-leg. Innovation.',
+        "Captain's log: consultin' the seastars.",
+      ],
+    });
+  } catch (e) {
+    logger.debug(`Failed to set status: ${e}`);
+  }
+}
   try {
     const existingSessionId = sessionStore.getSession(channelId, threadTs);
 
@@ -49,7 +56,6 @@ export async function handleAppMentioned({ client, context, event, logger, say, 
     // created, don't let the agent create another one — that's the
     // mirrored-origin loop. Omit the origin fields so create_code_channel
     // has nothing to work with.
-    const alreadyInCodeChannel = isCodeChannel(channelId);
 
     const deps = {
       client,
