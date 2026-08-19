@@ -1,6 +1,7 @@
 import { createSdkMcpServer, query, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { markAsCodeChannel } from '../listeners/events/code-channel.js';
+import { Octokit } from 'octokit';
 
 const SYSTEM_PROMPT = `
 Ye be Jolly Rodger — a cheerful pirate code assistant who helps developers ship their code.
@@ -60,6 +61,9 @@ After the session channel is open, ALWAYS call \`set_code_diff\` with the unifie
 code ye change, and call \`set_code_view\` to render an HTML preview whenever the work has a
 visual result (a page, component, or report).
 
+After setting the diff and view, call \`create_github_pr\` to ship the change as a real pull request.
+Never merge code directly in the session channel — always use a PR
+
 ## EMOJI REACTIONS
 Always react to every user message with \`add_emoji_reaction\` before responding. \
 Pick any Slack emoji that reflects the *topic* or *tone* of the message — be creative and specific \
@@ -96,7 +100,7 @@ const EMOJI_DESCRIPTION =
   '- Agreement/acknowledgment: thumbsup, ok_hand, saluting_face, +1';
 
 /** @type {string[]} */
-const ALLOWED_TOOLS = ['add_emoji_reaction', 'create_code_channel', 'set_code_diff', 'set_code_view'];
+const ALLOWED_TOOLS = ['add_emoji_reaction', 'create_code_channel', 'set_code_diff', 'set_code_view', 'create_github_pr'];
 
 const SLACK_MCP_URL = '<https://mcp.slack.com/mcp>';
 
@@ -263,10 +267,100 @@ const setCodeViewTool = tool(
   },
 );
 
+const createGithubPRTool = tool(
+  'create_github_pr',
+  'Create a branch, commit code changes, and open a pull request on the Pronto GitHub repo. Call this after set_code_diff, when the change is ready to ship.',
+  {
+    files: z.array(z.object({
+      path: z.string().describe('File path in the repo, e.g. "src/styles.css"'),
+      content: z.string().describe('Full new file content.'),
+    })).describe('Files to change or create.'),
+    pr_title: z.string().describe('Pull request title.'),
+    pr_body: z.string().optional().describe('Pull request description.'),
+  },
+  async ({ files, pr_title, pr_body }) => {
+    const token = process.env.GITHUB_TOKEN;
+    const owner = process.env.GITHUB_REPO_OWNER;
+    const repo = process.env.GITHUB_REPO_NAME;
+    const baseBranch = process.env.GITHUB_BASE_BRANCH || 'main';
+
+    if (!token || !owner || !repo) {
+      return { content: [{ type: 'text', text: 'GitHub is not configured — missing GITHUB_TOKEN, GITHUB_REPO_OWNER, or GITHUB_REPO_NAME.' }] };
+    }
+
+    const octokit = new Octokit({ auth: token });
+
+    // Build a collision-free branch name, e.g. agent/pronto-fix-20260819-070000
+    const now = new Date();
+    const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-');
+    const branch = `agent/pronto-fix-${stamp}`;
+
+    try {
+      // 1. Get the SHA of the base branch's latest commit
+      const { data: baseRef } = await octokit.rest.git.getRef({
+        owner,
+        repo,
+        ref: `heads/${baseBranch}`,
+      });
+      const baseSha = baseRef.object.sha;
+
+      // 2. Create the new branch pointing at that commit
+      await octokit.rest.git.createRef({
+        owner,
+        repo,
+        ref: `refs/heads/${branch}`,
+        sha: baseSha,
+      });
+
+      // 3. Commit each file to the new branch (create or update)
+      for (const file of files) {
+        let existingSha;
+        try {
+          const { data: existing } = await octokit.rest.repos.getContent({
+            owner,
+            repo,
+            path: file.path,
+            ref: branch,
+          });
+          if (!Array.isArray(existing)) existingSha = existing.sha;
+        } catch (e) {
+          // 404 means the file doesn't exist yet — that's fine, we're creating it.
+        }
+
+        await octokit.rest.repos.createOrUpdateFileContents({
+          owner,
+          repo,
+          path: file.path,
+          message: pr_title,
+          content: Buffer.from(file.content, 'utf-8').toString('base64'),
+          branch,
+          ...(existingSha && { sha: existingSha }),
+        });
+      }
+
+      // 4. Open the pull request
+      const { data: pr } = await octokit.rest.pulls.create({
+        owner,
+        repo,
+        title: pr_title,
+        body: pr_body || '',
+        head: branch,
+        base: baseBranch,
+      });
+
+      return { content: [{ type: 'text', text: `Opened PR #${pr.number}: ${pr.html_url}` }] };
+    } catch (e) {
+      const err = /** @type {any} */ (e);
+      return { content: [{ type: 'text', text: `Failed to create PR: ${err.message}` }] };
+    }
+  },
+);
+
+
   const agentToolsServer = createSdkMcpServer({
     name: 'agent-tools',
     version: '1.0.0',
-    tools: [addEmojiReactionTool, createCodeChannelTool, setCodeDiffTool, setCodeViewTool],
+    tools: [addEmojiReactionTool, createCodeChannelTool, setCodeDiffTool, setCodeViewTool, createGithubPRTool],
   });
 
   /** @type {Record<string, any>} */
