@@ -510,7 +510,8 @@ export async function runAgent(text, sessionId = undefined, deps = undefined) {
     mcpServers,
     allowedTools,
     permissionMode: 'bypassPermissions',
-    model: 'claude-sonnet-4-5-20250929',
+//    model: 'claude-sonnet-4-5-20250929',
+    model: 'claude-haiku-4-5-20251001',
     ...(sessionId && { resume: sessionId }),
   };
 
