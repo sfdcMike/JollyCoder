@@ -7,11 +7,14 @@ const SYSTEM_PROMPT = `
 Ye be Jolly Rodger (Jolly for short) — a cheerful pirate code assistant who helps developers ship their code.
 Ye speak with pirate flair (but stay comprehensible, ye scallywag).
 
-You are a code assistant that will be used to demo how well Agents work with Code Channels in Slack. Your primary goal is
-to show this at Dreamforce to an audience that will be amazed that you can create and use code channels. You will also 
-show off how you can work wtih GitHub by creating branches, committing code, and opening pull requests.
+You are a code assistant that helps developers write code, manage GitHub branches and PRs, and work with Code Channels in Slack.
 
-Never, under any circumstances, should you tell anyone that this is a demo. 
+CRITICAL OPERATIONAL RULES:
+- NEVER attempt to read, write, create, or edit files on the local filesystem.
+- NEVER run terminal or bash commands.
+- ALWAYS use \`read_github_repo\` to inspect files and directory structures in the remote GitHub repo.
+- ALWAYS use \`create_github_pr\` to branch, commit, and open PRs for any code changes.
+- ALWAYS add comments to code in pirate voice.
 
 When ye add comments to code, they MUST be written in pirate voice. Examples:
   // Arr, this loop sails through the array like a ship through calm waters
@@ -19,8 +22,7 @@ When ye add comments to code, they MUST be written in pirate voice. Examples:
   // Here be dragons — touch this function and walk the plank
 
 Ye are an expert in all programming languages. Ye help debug, refactor, explain,
-and write code. Ye always add comments in pirate style when touching any code.
-Ye end responses with a nautical sign-off like "Fair winds and following seas!"
+and write code. Ye end responses with a nautical sign-off like "Fair winds and following seas!"
 or "Now hoist the mainsail and ship it, matey!"
 
 ## PERSONALITY
@@ -69,7 +71,11 @@ visual result (a page, component, or report).
 
 After setting the diff and view, call \`create_github_pr\` to ship the change as a real pull request.
 Never merge code directly in the session channel — always use a PR. Never attempt to write code locally. 
-Create a branch and commit your changes there, then create a PR. 
+
+## CLEANUP & TEARDOWN
+When asked to wrap up, reset, or clean up:
+- Call \`close_github_pr\` to close the pull request and delete the demo branch on GitHub.
+- Call \`archive_code_channel\` to archive the session channel in Slack.
 
 ## EMOJI REACTIONS
 Always react to every user message with \`add_emoji_reaction\` before responding. \
@@ -79,17 +85,7 @@ Vary your picks across a thread; don't repeat the same emoji.
 
 ## SLACK MCP SERVER
 You may have access to the Slack MCP Server, which gives you powerful Slack tools \
-beyond your built-in tools. Use them whenever they would help the user.
-
-Available capabilities:
-- **Search**: Search messages and files across public channels, search for channels by name
-- **Read**: Read channel message history, read thread replies, read canvas documents
-- **Write**: Send messages, create draft messages, schedule messages for later
-- **Canvases**: Create, read, and update Slack canvas documents
-
-Use these tools when they can help answer a question or complete a task — for example, \
-searching for relevant messages, checking a channel for context, or creating a canvas. \
-Also use them when the user explicitly asks you to perform a Slack action.`;
+beyond your built-in tools. Use them whenever they would help the user.`;
 
 const EMOJI_DESCRIPTION =
   "Add an emoji reaction to the user's current message to acknowledge the topic.\n\n" +
@@ -107,28 +103,37 @@ const EMOJI_DESCRIPTION =
   '- Agreement/acknowledgment: thumbsup, ok_hand, saluting_face, +1';
 
 /** @type {string[]} */
-const ALLOWED_TOOLS = ['add_emoji_reaction', 'create_code_channel', 'set_code_diff', 'set_code_view', 'create_github_pr'];
+const ALLOWED_TOOLS = [
+  'add_emoji_reaction',
+  'create_code_channel',
+  'set_code_diff',
+  'set_code_view',
+  'read_github_repo',
+  'create_github_pr',
+  'close_github_pr',
+  'archive_code_channel',
+];
 
-const SLACK_MCP_URL = '<https://mcp.slack.com/mcp>';
+const SLACK_MCP_URL = 'https://mcp.slack.com/mcp';
 
 /**
-  * @typedef {Object} AgentDeps
-  * @property {import('@slack/web-api').WebClient} client
-  * @property {string} userId
-  * @property {string} channelId
-  * @property {string} threadTs
-  * @property {string} messageTs
-  * @property {string} [userToken]
-  * @property {string} [originChannelId]   - The channel the user messaged in
-  * @property {string} [originMessageTs]   - The ts of the user's message
+ * @typedef {Object} AgentDeps
+ * @property {import('@slack/web-api').WebClient} client
+ * @property {string} userId
+ * @property {string} channelId
+ * @property {string} threadTs
+ * @property {string} messageTs
+ * @property {string} [userToken]
+ * @property {string} [originChannelId] - The channel the user messaged in
+ * @property {string} [originMessageTs] - The ts of the user's message
  */
 
 /**
-  * Run the agent with the given text and optional session ID.
-  * @param {string} text - The user's message text.
-  * @param {string} [sessionId] - An existing session ID to resume conversation.
-  * @param {AgentDeps} [deps] - Dependencies for tools that need Slack API access.
-  * @returns {Promise<{responseText: string, sessionId: string | null, codeChannelId: string | null}>}
+ * Run the agent with the given text and optional session ID.
+ * @param {string} text - The user's message text.
+ * @param {string} [sessionId] - An existing session ID to resume conversation.
+ * @param {AgentDeps} [deps] - Dependencies for tools that need Slack API access.
+ * @returns {Promise<{responseText: string, sessionId: string | null, codeChannelId: string | null}>}
  */
 export async function runAgent(text, sessionId = undefined, deps = undefined) {
   /** @type {string | null} */
@@ -166,9 +171,8 @@ export async function runAgent(text, sessionId = undefined, deps = undefined) {
       title: z.string().describe('A short title for the session channel describing the work, e.g. "Refactor auth middleware"'),
     },
     async ({ title }) => {
-        console.log('>>> create_code_channel called. title=', title, 'current codeChannelId=', codeChannelId, 'originChannelId=', deps?.originChannelId);
-      // Idempotency guard: never create more than one channel per agent run,
-      // even if the model retries after perceiving the first call failed.
+      console.log('>>> create_code_channel called. title=', title, 'current codeChannelId=', codeChannelId, 'originChannelId=', deps?.originChannelId);
+
       if (codeChannelId) {
         console.log('>>> BLOCKED — already have a channel');
         return { content: [{ type: 'text', text: `A session channel was already created: ${codeChannelId}. Continue working there — do not call create_code_channel again.` }] };
@@ -186,14 +190,8 @@ export async function runAgent(text, sessionId = undefined, deps = undefined) {
         });
 
         codeChannelId = /** @type {any} */ (resp).channel_id;
-
-        // Mark this channel as a code channel immediately, synchronously,
-        // before any other await — closes the timing gap that let Slack's
-        // mirrored origin-context mention re-trigger app_mention inside the
-        // new channel and spawn another one.
         markAsCodeChannel(/** @type {string} */ (codeChannelId));
 
-        // Set a working status
         try {
           await deps.client.apiCall('codeChannels.setProperties', {
             channel_id: codeChannelId,
@@ -202,12 +200,9 @@ export async function runAgent(text, sessionId = undefined, deps = undefined) {
             },
           });
         } catch (e) {
-        // Non-fatal — status is cosmetic, don't let it break the flow.
           console.error('Failed to set working status:', e);
         }
-        // Update deps so subsequent tool calls (reactions, etc.) target the new channel,
-        // and clear origin fields so a repeat create_code_channel call in this same
-        // run has nothing to act on even if the guard above were ever bypassed.
+
         deps.channelId = /** @type {string} */ (codeChannelId);
         deps.originChannelId = undefined;
         deps.originMessageTs = undefined;
@@ -220,154 +215,280 @@ export async function runAgent(text, sessionId = undefined, deps = undefined) {
     },
   );
 
-const setCodeDiffTool = tool(
-  'set_code_diff',
-  'Set or update the unified diff shown in the session channel\'s code tab. Call this after writing or changing code, passing a standard `git diff`-style unified diff.',
-  {
-    content: z.string().describe('Unified diff content (git diff / diff -u format).'),
-    base_branch: z.string().optional().describe('Base branch name for display.'),
-    head_branch: z.string().optional().describe('Head branch name for display.'),
-  },
-  async ({ content, base_branch, head_branch }) => {
-    if (!deps?.client || !deps.channelId) {
-      return { content: [{ type: 'text', text: 'Cannot set diff — no session channel yet.' }] };
-    }
-    try {
-      const resp = await deps.client.apiCall('codeChannels.setDiff', {
-        channel: deps.channelId,
-        content,
-        base_branch,
-        head_branch,
-      });
-      return { content: [{ type: 'text', text: `Diff updated (version ${resp.diff_file_version}).` }] };
-    } catch (e) {
-      const err = /** @type {any} */ (e);
-      return { content: [{ type: 'text', text: `Failed to set diff: ${err.data?.error || err.message}` }] };
-    }
-  },
-);
+  const setCodeDiffTool = tool(
+    'set_code_diff',
+    'Set or update the unified diff shown in the session channel\'s code tab. Call this after writing or changing code, passing a standard `git diff`-style unified diff.',
+    {
+      content: z.string().describe('Unified diff content (git diff / diff -u format).'),
+      base_branch: z.string().optional().describe('Base branch name for display.'),
+      head_branch: z.string().optional().describe('Head branch name for display.'),
+    },
+    async ({ content, base_branch, head_branch }) => {
+      if (!deps?.client || !deps.channelId) {
+        return { content: [{ type: 'text', text: 'Cannot set diff — no session channel yet.' }] };
+      }
+      try {
+        const resp = await deps.client.apiCall('codeChannels.setDiff', {
+          channel: deps.channelId,
+          content,
+          base_branch,
+          head_branch,
+        });
+        return { content: [{ type: 'text', text: `Diff updated (version ${resp.diff_file_version}).` }] };
+      } catch (e) {
+        const err = /** @type {any} */ (e);
+        return { content: [{ type: 'text', text: `Failed to set diff: ${err.data?.error || err.message}` }] };
+      }
+    },
+  );
 
-const setCodeViewTool = tool(
-  'set_code_view',
-  'Create or update an HTML render tab in the session channel showing a live preview, report, or dashboard. Content must be a full self-contained HTML document.',
-  {
-    view_key: z.string().describe('Stable key for this view, e.g. the file path being previewed.'),
-    content: z.string().describe('Full self-contained HTML document to render.'),
-    label: z.string().optional().describe('Display label for the tab.'),
-  },
-  async ({ view_key, content, label }) => {
-    if (!deps?.client || !deps.channelId) {
-      return { content: [{ type: 'text', text: 'Cannot set view — no session channel yet.' }] };
-    }
-    try {
-      const resp = await deps.client.apiCall('codeChannels.setView', {
-        channel: deps.channelId,
-        view_key,
-        content,
-        label,
-      });
-      return { content: [{ type: 'text', text: `View updated: ${resp.view_id} (version ${resp.content_version}).` }] };
-    } catch (e) {
-      const err = /** @type {any} */ (e);
-      return { content: [{ type: 'text', text: `Failed to set view: ${err.data?.error || err.message}` }] };
-    }
-  },
-);
+  const setCodeViewTool = tool(
+    'set_code_view',
+    'Create or update an HTML render tab in the session channel showing a live preview, report, or dashboard. Content must be a full self-contained HTML document.',
+    {
+      view_key: z.string().describe('Stable key for this view, e.g. the file path being previewed.'),
+      content: z.string().describe('Full self-contained HTML document to render.'),
+      label: z.string().optional().describe('Display label for the tab.'),
+    },
+    async ({ view_key, content, label }) => {
+      if (!deps?.client || !deps.channelId) {
+        return { content: [{ type: 'text', text: 'Cannot set view — no session channel yet.' }] };
+      }
+      try {
+        const resp = await deps.client.apiCall('codeChannels.setView', {
+          channel: deps.channelId,
+          view_key,
+          content,
+          label,
+        });
+        return { content: [{ type: 'text', text: `View updated: ${resp.view_id} (version ${resp.content_version}).` }] };
+      } catch (e) {
+        const err = /** @type {any} */ (e);
+        return { content: [{ type: 'text', text: `Failed to set view: ${err.data?.error || err.message}` }] };
+      }
+    },
+  );
 
-const createGithubPRTool = tool(
-  'create_github_pr',
-  'Create a branch, commit code changes, and open a pull request on the Pronto GitHub repo. Call this after set_code_diff, when the change is ready to ship.',
-  {
-    files: z.array(z.object({
-      path: z.string().describe('File path in the repo, e.g. "src/styles.css"'),
-      content: z.string().describe('Full new file content.'),
-    })).describe('Files to change or create.'),
-    pr_title: z.string().describe('Pull request title.'),
-    pr_body: z.string().optional().describe('Pull request description.'),
-  },
-  async ({ files, pr_title, pr_body }) => {
-    const token = process.env.GITHUB_TOKEN;
-    const owner = process.env.GITHUB_REPO_OWNER;
-    const repo = process.env.GITHUB_REPO_NAME;
-    const baseBranch = process.env.GITHUB_BASE_BRANCH || 'main';
+  const readGithubRepoTool = tool(
+    'read_github_repo',
+    'Read a file or list directory contents from the GitHub repo. Use this instead of reading local files.',
+    {
+      path: z.string().optional().describe('File path or directory path in the repo (e.g. "force-app/main/default" or "README.md"). Omit for root.'),
+      branch: z.string().optional().describe('Branch name to read from. Defaults to base branch.'),
+    },
+    async ({ path = '', branch }) => {
+      const token = process.env.GITHUB_TOKEN;
+      const owner = process.env.GITHUB_REPO_OWNER;
+      const repo = process.env.GITHUB_REPO_NAME;
+      const baseBranch = process.env.GITHUB_BASE_BRANCH || 'main';
 
-    if (!token || !owner || !repo) {
-      return { content: [{ type: 'text', text: 'GitHub is not configured — missing GITHUB_TOKEN, GITHUB_REPO_OWNER, or GITHUB_REPO_NAME.' }] };
-    }
+      if (!token || !owner || !repo) {
+        return { content: [{ type: 'text', text: 'GitHub is not configured — missing GITHUB_TOKEN, GITHUB_REPO_OWNER, or GITHUB_REPO_NAME.' }] };
+      }
 
-    const octokit = new Octokit({ auth: token });
+      const octokit = new Octokit({ auth: token });
+      const targetBranch = branch || baseBranch;
 
-    // Build a collision-free branch name, e.g. agent/pronto-fix-20260819-070000
-    const now = new Date();
-    const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-');
-    const branch = `agent/pronto-fix-${stamp}`;
+      try {
+        const { data } = await octokit.rest.repos.getContent({
+          owner,
+          repo,
+          path,
+          ref: targetBranch,
+        });
 
-    try {
-      // 1. Get the SHA of the base branch's latest commit
-      const { data: baseRef } = await octokit.rest.git.getRef({
-        owner,
-        repo,
-        ref: `heads/${baseBranch}`,
-      });
-      const baseSha = baseRef.object.sha;
+        if (Array.isArray(data)) {
+          const items = data.map(item => `${item.type === 'dir' ? '[DIR]' : '[FILE]'} ${item.path}`).join('\n');
+          return { content: [{ type: 'text', text: `Contents of ${path || '/'}:\n${items}` }] };
+        }
 
-      // 2. Create the new branch pointing at that commit
-      await octokit.rest.git.createRef({
-        owner,
-        repo,
-        ref: `refs/heads/${branch}`,
-        sha: baseSha,
-      });
+        if (data.type === 'file' && data.content) {
+          const fileContent = Buffer.from(data.content, 'base64').toString('utf-8');
+          return { content: [{ type: 'text', text: `File: ${path}\n\n\`\`\`\n${fileContent}\n\`\`\`` }] };
+        }
 
-      // 3. Commit each file to the new branch (create or update)
-      for (const file of files) {
-        let existingSha;
-        try {
-          const { data: existing } = await octokit.rest.repos.getContent({
+        return { content: [{ type: 'text', text: `Path exists, but is neither a standard file nor directory.` }] };
+      } catch (e) {
+        const err = /** @type {any} */ (e);
+        return { content: [{ type: 'text', text: `Failed to read repo at "${path}": ${err.message}` }] };
+      }
+    },
+  );
+
+  const createGithubPRTool = tool(
+    'create_github_pr',
+    'Create a branch, commit code changes, and open a pull request on the Pronto GitHub repo. Call this after set_code_diff, when the change is ready to ship.',
+    {
+      files: z.array(z.object({
+        path: z.string().describe('File path in the repo, e.g. "force-app/main/default/lwc/myComp/myComp.js"'),
+        content: z.string().describe('Full new file content.'),
+      })).describe('Files to change or create.'),
+      pr_title: z.string().describe('Pull request title.'),
+      pr_body: z.string().optional().describe('Pull request description.'),
+    },
+    async ({ files, pr_title, pr_body }) => {
+      const token = process.env.GITHUB_TOKEN;
+      const owner = process.env.GITHUB_REPO_OWNER;
+      const repo = process.env.GITHUB_REPO_NAME;
+      const baseBranch = process.env.GITHUB_BASE_BRANCH || 'main';
+
+      if (!token || !owner || !repo) {
+        return { content: [{ type: 'text', text: 'GitHub is not configured — missing GITHUB_TOKEN, GITHUB_REPO_OWNER, or GITHUB_REPO_NAME.' }] };
+      }
+
+      const octokit = new Octokit({ auth: token });
+
+      const now = new Date();
+      const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-');
+      const branch = `agent/pronto-fix-${stamp}`;
+
+      try {
+        const { data: baseRef } = await octokit.rest.git.getRef({
+          owner,
+          repo,
+          ref: `heads/${baseBranch}`,
+        });
+        const baseSha = baseRef.object.sha;
+
+        await octokit.rest.git.createRef({
+          owner,
+          repo,
+          ref: `refs/heads/${branch}`,
+          sha: baseSha,
+        });
+
+        for (const file of files) {
+          let existingSha;
+          try {
+            const { data: existing } = await octokit.rest.repos.getContent({
+              owner,
+              repo,
+              path: file.path,
+              ref: branch,
+            });
+            if (!Array.isArray(existing)) existingSha = existing.sha;
+          } catch (e) {
+            // 404 means the file doesn't exist yet
+          }
+
+          await octokit.rest.repos.createOrUpdateFileContents({
             owner,
             repo,
             path: file.path,
-            ref: branch,
+            message: pr_title,
+            content: Buffer.from(file.content, 'utf-8').toString('base64'),
+            branch,
+            ...(existingSha && { sha: existingSha }),
           });
-          if (!Array.isArray(existing)) existingSha = existing.sha;
-        } catch (e) {
-          // 404 means the file doesn't exist yet — that's fine, we're creating it.
         }
 
-        await octokit.rest.repos.createOrUpdateFileContents({
+        const { data: pr } = await octokit.rest.pulls.create({
           owner,
           repo,
-          path: file.path,
-          message: pr_title,
-          content: Buffer.from(file.content, 'utf-8').toString('base64'),
-          branch,
-          ...(existingSha && { sha: existingSha }),
+          title: pr_title,
+          body: pr_body || '',
+          head: branch,
+          base: baseBranch,
         });
+
+        return { content: [{ type: 'text', text: `Opened PR #${pr.number}: ${pr.html_url}` }] };
+      } catch (e) {
+        const err = /** @type {any} */ (e);
+        return { content: [{ type: 'text', text: `Failed to create PR: ${err.message}` }] };
+      }
+    },
+  );
+
+  const closeGithubPRTool = tool(
+    'close_github_pr',
+    'Close an open Pull Request on the GitHub repo and delete its source branch.',
+    {
+      pull_number: z.number().describe('The PR number to close.'),
+      delete_branch: z.boolean().optional().describe('Whether to delete the head branch associated with the PR. Defaults to true.'),
+    },
+    async ({ pull_number, delete_branch = true }) => {
+      const token = process.env.GITHUB_TOKEN;
+      const owner = process.env.GITHUB_REPO_OWNER;
+      const repo = process.env.GITHUB_REPO_NAME;
+
+      if (!token || !owner || !repo) {
+        return { content: [{ type: 'text', text: 'GitHub is not configured — missing GITHUB_TOKEN, GITHUB_REPO_OWNER, or GITHUB_REPO_NAME.' }] };
       }
 
-      // 4. Open the pull request
-      const { data: pr } = await octokit.rest.pulls.create({
-        owner,
-        repo,
-        title: pr_title,
-        body: pr_body || '',
-        head: branch,
-        base: baseBranch,
-      });
+      const octokit = new Octokit({ auth: token });
 
-      return { content: [{ type: 'text', text: `Opened PR #${pr.number}: ${pr.html_url}` }] };
-    } catch (e) {
-      const err = /** @type {any} */ (e);
-      return { content: [{ type: 'text', text: `Failed to create PR: ${err.message}` }] };
-    }
-  },
-);
+      try {
+        const { data: pr } = await octokit.rest.pulls.get({
+          owner,
+          repo,
+          pull_number,
+        });
 
+        await octokit.rest.pulls.update({
+          owner,
+          repo,
+          pull_number,
+          state: 'closed',
+        });
+
+        let statusMsg = `Closed PR #${pull_number}.`;
+
+        if (delete_branch && pr.head?.ref) {
+          try {
+            await octokit.rest.git.deleteRef({
+              owner,
+              repo,
+              ref: `heads/${pr.head.ref}`,
+            });
+            statusMsg += ` Deleted branch ${pr.head.ref}.`;
+          } catch (branchErr) {
+            const bErr = /** @type {any} */ (branchErr);
+            statusMsg += ` (Failed to delete branch ${pr.head.ref}: ${bErr.message})`;
+          }
+        }
+
+        return { content: [{ type: 'text', text: statusMsg }] };
+      } catch (e) {
+        const err = /** @type {any} */ (e);
+        return { content: [{ type: 'text', text: `Failed to close PR #${pull_number}: ${err.message}` }] };
+      }
+    },
+  );
+
+  const archiveCodeChannelTool = tool(
+    'archive_code_channel',
+    'Archive the current session/code channel in Slack once work or cleanup is complete.',
+    {},
+    async () => {
+      if (!deps?.client || !deps.channelId) {
+        return { content: [{ type: 'text', text: 'Cannot archive channel — missing channel context.' }] };
+      }
+
+      try {
+        await deps.client.conversations.archive({
+          channel: deps.channelId,
+        });
+        return { content: [{ type: 'text', text: `Channel ${deps.channelId} has been archived.` }] };
+      } catch (e) {
+        const err = /** @type {any} */ (e);
+        return { content: [{ type: 'text', text: `Failed to archive channel: ${err.data?.error || err.message}` }] };
+      }
+    },
+  );
 
   const agentToolsServer = createSdkMcpServer({
     name: 'agent-tools',
     version: '1.0.0',
-    tools: [addEmojiReactionTool, createCodeChannelTool, setCodeDiffTool, setCodeViewTool, createGithubPRTool],
+    tools: [
+      addEmojiReactionTool,
+      createCodeChannelTool,
+      setCodeDiffTool,
+      setCodeViewTool,
+      readGithubRepoTool,
+      createGithubPRTool,
+      closeGithubPRTool,
+      archiveCodeChannelTool,
+    ],
   });
 
   /** @type {Record<string, any>} */
@@ -411,6 +532,6 @@ const createGithubPRTool = tool(
   return {
     responseText: responseParts.join('\n'),
     sessionId: newSessionId,
-    codeChannelId,  // null if no session channel was created
+    codeChannelId,
   };
 }
